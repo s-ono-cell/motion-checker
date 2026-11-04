@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>モーションチェッカー</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><h1>🏃 モーションチェッカー</h1><p>動画から骨格を見つけて、動きをチェックしよう（動画は端末の外に送られません）</p></header>
+<main>
+<section id="step1" class="card">
+<h2>① 種目をえらぶ</h2>
+<div id="sports" class="grid"></div>
+<div id="tips" class="tips"></div>
+</section>
+
+<section id="step2" class="card">
+<h2>② 動画をえらぶ</h2>
+<label class="btn">📹 動画を選ぶ<input id="file" type="file" accept="video/*" hidden></label>
+<label>メインで使う側：
+<select id="side"><option value="R">右</option><option value="L">左</option></select></label>
+<button id="analyze" class="btn primary" disabled>🔍 解析スタート</button>
+<progress id="prog" value="0" max="1" hidden></progress>
+<p id="status" class="note"></p>
+</section>
+
+<section id="step3" class="card" hidden>
+<h2>③ チェックする</h2>
+<div class="stage"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
+<div class="ctrl">
+<button id="prev" class="btn">◀ 1コマ</button>
+<button id="play" class="btn">▶ 再生</button>
+<button id="next" class="btn">1コマ ▶</button>
+</div>
+<input id="slider" type="range" min="0" max="0" value="0">
+<p id="time" class="note"></p>
+<div id="angles" class="angles"></div>
+<h3>角度のグラフ（縦線＝今のコマ）</h3>
+<canvas id="graph" width="800" height="240"></canvas>
+<h3>見るポイント</h3>
+<ul id="check" class="check"></ul>
+<button id="csv" class="btn">💾 データ(CSV)を保存</button>
+</section>
+</main>
+<footer>骨格推定：MediaPipe Pose。角度は目安です。撮影角度で変わります。</footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>
