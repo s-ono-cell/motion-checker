@@ -46,7 +46,7 @@ const SPORTS = {
 const IDX = { L: { sh: 11, el: 13, wr: 15, hip: 23, kn: 25, an: 27 }, R: { sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28 } };
 const $ = id => document.getElementById(id);
 const video = $("video"), overlay = $("overlay"), graph = $("graph");
-let sport = "kick", frames = [], series = null, landmarker = null, cur = 0, playing = false;
+let sport = "kick", frames = [], series = null, landmarker = null, cur = 0, playing = false, tsBase = 0;
 
 function renderSports() {
   $("sports").innerHTML = "";
@@ -99,7 +99,9 @@ const seek = t => new Promise(r => { video.onseeked = () => r(); video.currentTi
 
 $("file").onchange = e => {
   const f = e.target.files[0]; if (!f) return;
+  playing = false; $("step3").hidden = true; frames = [];
   video.src = URL.createObjectURL(f);
+  e.target.value = "";
   video.onloadedmetadata = () => { $("analyze").disabled = false; $("status").textContent = "動画を読み込みました。「解析スタート」を押してください。"; };
 };
 
@@ -113,12 +115,13 @@ $("analyze").onclick = async () => {
     for (let i = 0; i <= n; i++) {
       const t = Math.min(i * STEP, video.duration);
       await seek(t);
-      const r = lm.detectForVideo(video, Math.round(t * 1000) + 1 + i);
+      const r = lm.detectForVideo(video, tsBase + Math.round(t * 1000) + 1 + i);
       const lmk = r.landmarks[0], wl = r.worldLandmarks[0];
       frames.push({ t, lmk, wl, ang: wl ? compute(wl, side) : null });
       $("prog").value = i;
       $("status").textContent = `解析中… ${i}/${n}`;
     }
+    tsBase += Math.round(video.duration * 1000) + n + 1000;
     $("prog").hidden = true;
     const ok = frames.filter(f => f.ang).length;
     $("status").textContent = ok ? "解析が完了しました！" : "人が見つかりませんでした。全身が写る動画で試してください。";
