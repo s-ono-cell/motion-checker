@@ -1,8 +1,8 @@
 import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
-const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task";
-const FPS = 30, MAX_FRAMES = 300;
+const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task";
+const FPS = 30, MAX_FRAMES = 300, COARSE_FPS = 15, MAX_FINE_FPS = 120;
 const IDX = { L: { sh: 11, el: 13, wr: 15, hip: 23, kn: 25, an: 27 }, R: { sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28 } };
 const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32]];
 const JOINTS = [11,12,13,14,15,16,23,24,25,26,27,28,31,32];
@@ -56,6 +56,7 @@ function createSlot(key, title, hint, num) {
     <div class="viewer" hidden>
       <div class="stage"><video playsinline muted></video><canvas class="overlay"></canvas></div>
       <div class="ctrl phases"></div>
+      <button class="btn setimp">📍 このコマをインパクトにする</button>
       <div class="ctrl">
         <button class="btn prev">◀ 1コマ</button>
         <button class="btn play">▶ 再生</button>
@@ -102,6 +103,7 @@ function createSlot(key, title, hint, num) {
     btn.textContent = "▶ 再生";
   };
   q(".csv").onclick = () => exportCsv(s);
+  q(".setimp").onclick = () => { setImpact(s, s.cur); show(s, s.cur); updateSync(); };
   slots[key] = s;
   return s;
 }
@@ -114,44 +116,110 @@ function seek(video, t) {
   });
 }
 
+const avg = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+const median = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; };
+
 // ---- 解析 ----
+const TOE = { L: 31, R: 32 };
+let tsCounter = 0;
+
+// 動画のコマ間隔を実測して実際のフレームレートを推定
+async function detectFps(v) {
+  if (!v.requestVideoFrameCallback) return 60;
+  const times = [];
+  try {
+    v.currentTime = 0; v.muted = true;
+    await new Promise(r => { v.onseeked = r; });
+    const done = new Promise(res => {
+      const cb = (_, m) => { times.push(m.mediaTime); if (times.length < 12) v.requestVideoFrameCallback(cb); else res(); };
+      v.requestVideoFrameCallback(cb);
+      setTimeout(res, 1500);
+    });
+    await v.play(); await done; v.pause();
+  } catch { return 60; }
+  const d = times.slice(1).map((t, i) => t - times[i]).filter(x => x > 1e-4);
+  return d.length ? Math.min(240, Math.max(24, Math.round(1 / median(d)))) : 60;
+}
+
+async function runPass(s, lm, times, label) {
+  const v = s.video, W = v.videoWidth, H = v.videoHeight, out = [];
+  s.prog.hidden = false; s.prog.max = times.length; s.prog.value = 0;
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i];
+    await seek(v, t);
+    const r = lm.detectForVideo(v, (tsCounter += 20));
+    const lmk = r.landmarks[0], wl = r.worldLandmarks[0];
+    out.push({ t, lmk, wl, p: lmk ? lmk.map(q => ({ x: q.x * W, y: q.y * H, z: 0 })) : null });
+    s.prog.value = i + 1;
+    s.status.textContent = `${label} ${i + 1}/${times.length}`;
+  }
+  return out;
+}
+
+// 欠けたコマを前後から補間した蹴り足つま先〜足首の軌跡
+function footTrack(F, foot) {
+  const k = IDX[foot];
+  const xs = F.map(f => (f.p ? (f.p[k.an].x + f.p[TOE[foot]].x) / 2 : null));
+  const ys = F.map(f => (f.p ? (f.p[k.an].y + f.p[TOE[foot]].y) / 2 : null));
+  const fill = a => {
+    const idx = a.map((v, i) => (v == null ? -1 : i)).filter(i => i >= 0);
+    if (!idx.length) return a.map(() => 0);
+    return a.map((v, i) => {
+      if (v != null) return v;
+      const lo = [...idx].reverse().find(j => j < i), hi = idx.find(j => j > i);
+      if (lo == null) return a[hi]; if (hi == null) return a[lo];
+      return a[lo] + (a[hi] - a[lo]) * (i - lo) / (hi - lo);
+    });
+  };
+  return { x: fill(xs), y: fill(ys) };
+}
+
+// 5点の最小二乗(Savitzky-Golay)微分で、ノイズに強い速さ(胴体の長さ/秒)を求める
+function speedOf(F, foot, step, torso) {
+  const { x, y } = footTrack(F, foot), n = F.length;
+  const at = (a, i) => a[Math.max(0, Math.min(n - 1, i))];
+  const d = a => a.map((_, i) => (-2 * at(a, i - 2) - at(a, i - 1) + at(a, i + 1) + 2 * at(a, i + 2)) / (10 * step));
+  const vx = d(x), vy = d(y);
+  return vx.map((_, i) => Math.hypot(vx[i], vy[i]) / torso);
+}
+
+const torsoOf = F => median(F.filter(f => f.p).map(f => norm(sub(mid(f.p[11], f.p[12]), mid(f.p[23], f.p[24])))));
+
 async function analyze(s) {
   s.analyzeBtn.disabled = true;
   s.playing = false;
   const foot = $("foot").value;
   try {
     const lm = await getLandmarker(m => (s.status.textContent = m));
-    const v = s.video;
-    const n = Math.min(MAX_FRAMES, Math.floor(v.duration * FPS));
-    s.step = v.duration / n;
-    s.frames = [];
-    s.prog.hidden = false; s.prog.max = n;
-    const W = v.videoWidth, H = v.videoHeight;
-    for (let i = 0; i <= n; i++) {
-      const t = Math.min(i * s.step, v.duration);
-      await seek(v, t);
-      const r = lm.detectForVideo(v, tsBase + Math.round(t * 1000) + 1 + i);
-      const lmk = r.landmarks[0], wl = r.worldLandmarks[0];
-      s.frames.push({ t, lmk, wl, p: lmk ? lmk.map(q => ({ x: q.x * W, y: q.y * H, z: 0 })) : null });
-      s.prog.value = i;
-      s.status.textContent = `解析中… ${i}/${n}`;
-    }
-    tsBase += Math.round(v.duration * 1000) + n + 1000;
-    s.prog.hidden = true;
-    if (!s.frames.some(f => f.lmk)) {
+    const v = s.video, dur = v.duration;
+    // 1回目：全体を粗く解析し、キックの位置を探す
+    const nC = Math.min(MAX_FRAMES, Math.max(4, Math.floor(dur * COARSE_FPS)));
+    const coarse = await runPass(s, lm, Array.from({ length: nC + 1 }, (_, i) => i * dur / nC), "キックの場面を探しています…");
+    if (!coarse.some(f => f.lmk)) {
+      s.prog.hidden = true;
       s.status.textContent = "人が見つかりませんでした。全身が写る動画で試してください。";
-    } else {
-      process(s, foot);
-      s.status.textContent = "解析が完了しました！";
-      s.ready = true;
-      s.viewer.hidden = false;
-      s.overlay.width = v.videoWidth; s.overlay.height = v.videoHeight;
-      s.slider.max = s.frames.length - 1;
-      renderPhases(s); renderCheck(s);
-      await show(s, s.impact);
-      updateSync();
-      s.sec.scrollIntoView({ behavior: "smooth" });
+      s.analyzeBtn.disabled = false; return;
     }
+    const cs = speedOf(coarse, foot, dur / nC, torsoOf(coarse) || 1);
+    let ci = 0; cs.forEach((q, i) => { if (q > cs[ci]) ci = i; });
+    const tc = coarse[ci].t;
+    // 2回目：キック前後を実際のフレームレートで細かく解析
+    s.status.textContent = "コマ間隔を調べています…";
+    const nativeFps = await detectFps(v);
+    const fine = Math.min(MAX_FINE_FPS, nativeFps);
+    s.step = 1 / fine; s.fps = nativeFps;
+    const t0 = Math.max(0, tc - 1.0), t1 = Math.min(dur, tc + 0.5), nF = Math.max(4, Math.floor((t1 - t0) * fine));
+    s.frames = await runPass(s, lm, Array.from({ length: nF + 1 }, (_, i) => t0 + i * s.step), "インパクト前後を細かく解析中…");
+    s.prog.hidden = true;
+    process(s, foot);
+    s.status.textContent = `解析が完了しました！（${fine}コマ/秒で解析）インパクトがずれていたら、コマ送りで合わせて「📍 このコマをインパクトにする」を押してください。`;
+    s.ready = true;
+    s.viewer.hidden = false;
+    s.overlay.width = v.videoWidth; s.overlay.height = v.videoHeight;
+    s.slider.max = s.frames.length - 1;
+    await show(s, s.impact);
+    updateSync();
+    s.sec.scrollIntoView({ behavior: "smooth" });
   } catch (err) {
     s.status.textContent = "エラー：" + err.message;
   }
@@ -159,14 +227,11 @@ async function analyze(s) {
 }
 
 function process(s, foot) {
-  const k = IDX[foot], o = IDX[other(foot)];
-  const F = s.frames;
-  // 各コマの角度
+  const k = IDX[foot], o = IDX[other(foot)], F = s.frames;
   for (const f of F) {
     f.ang = null;
     if (!f.wl || !f.p) continue;
     const w = f.wl, p = f.p;
-    f.torso = norm(sub(mid(p[11], p[12]), mid(p[23], p[24])));
     f.ang = {
       kickKnee: angle3(w[k.hip], w[k.kn], w[k.an]),
       supKnee: angle3(w[o.hip], w[o.kn], w[o.an]),
@@ -177,40 +242,45 @@ function process(s, foot) {
       headOffset: (p[0].x - p[o.an].x) / Math.max(1, Math.hypot(p[11].x - p[12].x, p[11].y - p[12].y))
     };
   }
-  const torsoAvg = avg(F.filter(f => f.torso).map(f => f.torso));
-  // 蹴り足の速さ（胴体の長さ/秒）。カメラ固定が前提
-  const sp = F.map((f, i) => {
-    const a = F[i - 1], b = F[i + 1];
-    if (!a || !b || !a.p || !b.p || !f.p) return 0;
-    return Math.hypot(b.p[k.an].x - a.p[k.an].x, b.p[k.an].y - a.p[k.an].y) / (b.t - a.t) / torsoAvg;
+  // 角度のブレを3点移動平均でならす
+  const raw = F.map(f => f.ang && { ...f.ang });
+  F.forEach((f, i) => {
+    if (!f.ang) return;
+    for (const key of Object.keys(f.ang)) {
+      const vals = [raw[i - 1], raw[i], raw[i + 1]].filter(Boolean).map(a => a[key]).filter(x => !isNaN(x));
+      if (vals.length) f.ang[key] = avg(vals);
+    }
   });
-  s.speed = sp.map((_, i) => avg(sp.slice(Math.max(0, i - 1), i + 2)));
-  let imp = 0;
-  s.speed.forEach((v, i) => { if (v > s.speed[imp]) imp = i; });
+  const torso = torsoOf(F) || 1;
+  s.torsoLen = (+$("height").value || 170) / 100 * 0.3;
+  s.speed = speedOf(F, foot, s.step, torso);
+  s.foot = foot;
+  const lo = 2, hi = Math.max(lo, F.length - 3);
+  let imp = lo;
+  for (let i = lo; i <= hi; i++) if (s.speed[i] > s.speed[imp]) imp = i;
+  setImpact(s, imp);
+}
+
+// インパクトのコマを決め、各局面を求め直す（自動・手動どちらでも使う）
+function setImpact(s, imp) {
+  const F = s.frames, o = IDX[other(s.foot)];
   s.impact = imp;
-  s.torsoLen = (+$("height").value || 170) / 100 * 0.3; // 肩〜腰の長さの目安(m)
-  s.peakMs = s.speed[imp] * s.torsoLen;
-  const win = Math.round(0.6 / s.step), from = Math.max(0, imp - win);
-  let back = from, plant = imp;
-  for (let i = from; i <= imp; i++) {
-    if (F[i].ang && (!F[back].ang || F[i].ang.kickKnee < F[back].ang.kickKnee)) back = i;
-  }
-  // 踏み込み：インパクト前の軸足がもっとも静止したコマ
-  let best = Infinity;
-  for (let i = Math.max(0, imp - Math.round(0.3 / s.step)); i <= imp; i++) {
+  s.peakMs = Math.max(...s.speed) * s.torsoLen;
+  const win = Math.round(0.6 / s.step);
+  let back = Math.max(0, imp - win);
+  for (let i = back; i <= imp; i++) if (F[i].ang && (!F[back].ang || F[i].ang.kickKnee < F[back].ang.kickKnee)) back = i;
+  let plant = imp, best = Infinity;
+  for (let i = Math.max(1, imp - Math.round(0.3 / s.step)); i <= Math.min(imp, F.length - 2); i++) {
     const a = F[i - 1], b = F[i + 1];
-    if (!a || !b || !a.p || !b.p) continue;
+    if (!a.p || !b.p) continue;
     const d = Math.hypot(b.p[o.an].x - a.p[o.an].x, b.p[o.an].y - a.p[o.an].y);
     if (d < best) { best = d; plant = i; }
   }
   const follow = Math.min(F.length - 1, imp + Math.round(0.25 / s.step));
-  s.phases = [
-    { name: "踏み込み", i: plant }, { name: "振りかぶり", i: back },
-    { name: "インパクト", i: imp }, { name: "フォロースルー", i: follow }
-  ];
-  s.back = back; s.foot = foot;
+  s.phases = [{ name: "踏み込み", i: plant }, { name: "振りかぶり", i: back }, { name: "インパクト", i: imp }, { name: "フォロースルー", i: follow }];
+  s.back = back;
+  renderPhases(s); renderCheck(s);
 }
-const avg = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
 
 // ---- 表示 ----
 function renderPhases(s) {
