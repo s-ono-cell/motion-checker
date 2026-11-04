@@ -3,47 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>モーションチェッカー</title>
+<title>フリーキック・チェッカー</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header><h1>🏃 モーションチェッカー</h1><p>動画から骨格を見つけて、動きをチェックしよう（動画は端末の外に送られません）</p></header>
+<header>
+<h1>⚽ フリーキック・チェッカー</h1>
+<p>真横と後ろから撮った動画で、キックのフォームをチェック（動画は端末の外に送られません）</p>
+<a href="basic.html" style="color:#fff;font-size:13px">他の種目（スローイン・シュート・競歩・ハードル）はこちら</a>
+</header>
 <main>
-<section id="step1" class="card">
-<h2>① 種目をえらぶ</h2>
-<div id="sports" class="grid"></div>
-<div id="tips" class="tips"></div>
+<section class="card">
+<h2>① 設定</h2>
+<label>蹴り足：<select id="foot"><option value="R">右足</option><option value="L">左足</option></select></label>
+<label>身長(cm)：<input id="height" type="number" value="170" min="120" max="210" style="font-size:16px;width:80px;padding:6px"></label>
+<div class="tips">📷 撮影のコツ<br>
+・<b>真横</b>：キックする側から全身（頭〜足先とボール）が入るように。主な分析に使います（膝などの角度が正確）。<br>
+・<b>後ろ</b>：蹴る方向の真後ろから全身を撮ります。体の傾き・ひねり・頭の位置を見ます。後ろからは<b>膝の角度は不正確</b>です。<br>
+・カメラは固定。1本は10秒以内に。真横だけでもOKです。</div>
 </section>
-
-<section id="step2" class="card">
-<h2>② 動画をえらぶ</h2>
-<label class="btn">📹 動画を選ぶ<input id="file" type="file" accept="video/*" hidden></label>
-<label>メインで使う側：
-<select id="side"><option value="R">右</option><option value="L">左</option></select></label>
-<button id="analyze" class="btn primary" disabled>🔍 解析スタート</button>
-<progress id="prog" value="0" max="1" hidden></progress>
-<p id="status" class="note"></p>
-</section>
-
-<section id="step3" class="card" hidden>
-<h2>③ チェックする</h2>
-<div class="stage"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
-<div class="ctrl">
-<button id="prev" class="btn">◀ 1コマ</button>
-<button id="play" class="btn">▶ 再生</button>
-<button id="next" class="btn">1コマ ▶</button>
-</div>
-<input id="slider" type="range" min="0" max="0" value="0">
-<p id="time" class="note"></p>
-<div id="angles" class="angles"></div>
-<h3>角度のグラフ（縦線＝今のコマ）</h3>
-<canvas id="graph" width="800" height="240"></canvas>
-<h3>見るポイント</h3>
-<ul id="check" class="check"></ul>
-<button id="csv" class="btn">💾 データ(CSV)を保存</button>
+<div id="slots"></div>
+<section id="syncbox" class="card" hidden>
+<h2>④ 2つを同時に見る</h2>
+<p class="note">インパクト（足が最も速い瞬間）を 0 にそろえて、2つの動画を同時にコマ送りできます。</p>
+<input id="sync" type="range" min="-30" max="30" value="0">
+<p id="synclabel" class="note"></p>
 </section>
 </main>
-<footer>骨格推定：MediaPipe Pose。角度は目安です。撮影角度で変わります。</footer>
-<script type="module" src="app.js"></script>
+<footer>骨格推定：MediaPipe Pose。数値は目安です。撮影角度で変わります。</footer>
+<script type="module" src="fk.js"></script>
 </body>
 </html>
