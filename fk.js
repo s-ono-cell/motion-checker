@@ -3,6 +3,7 @@ import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@m
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task";
 const FPS = 30, MAX_FRAMES = 300, COARSE_FPS = 15, MAX_FINE_FPS = 120;
+const PHASE_NAMES = ["踏み込み", "振りかぶり", "インパクト", "フォロースルー"];
 const IDX = { L: { sh: 11, el: 13, wr: 15, hip: 23, kn: 25, an: 27 }, R: { sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28 } };
 const BONES = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32]];
 const JOINTS = [11,12,13,14,15,16,23,24,25,26,27,28,31,32];
@@ -44,7 +45,7 @@ async function getLandmarker(setStatus) {
 
 // ---- スロット（真横 / 後ろ） ----
 function createSlot(key, title, hint, num) {
-  const s = { key, frames: [], cur: 0, playing: false, impact: -1, phases: [], step: 1 / FPS, ready: false };
+  const s = { key, frames: [], cur: 0, playing: false, impact: -1, phases: [], pins: {}, step: 1 / FPS, ready: false };
   const sec = document.createElement("section");
   sec.className = "card";
   sec.innerHTML = `
@@ -56,7 +57,8 @@ function createSlot(key, title, hint, num) {
     <div class="viewer" hidden>
       <div class="stage"><video playsinline muted></video><canvas class="overlay"></canvas></div>
       <div class="ctrl phases"></div>
-      <button class="btn setimp">📍 このコマをインパクトにする</button>
+      <p class="note">コマ送りで合わせてから、ピン止めしたい局面を押してください（📌＝自分で設定済み）。</p>
+      <div class="ctrl pins"></div>
       <div class="ctrl">
         <button class="btn prev">◀ 1コマ</button>
         <button class="btn play">▶ 再生</button>
@@ -103,7 +105,17 @@ function createSlot(key, title, hint, num) {
     btn.textContent = "▶ 再生";
   };
   q(".csv").onclick = () => exportCsv(s);
-  q(".setimp").onclick = () => { setImpact(s, s.cur); show(s, s.cur); updateSync(); };
+  const pins = q(".pins");
+  for (const name of PHASE_NAMES) {
+    const b = document.createElement("button");
+    b.className = "btn"; b.textContent = `📍 ${name}にする`;
+    b.onclick = () => { s.pins[name] = s.cur; setImpact(s, s.autoImp); show(s, s.cur); updateSync(); };
+    pins.appendChild(b);
+  }
+  const rb = document.createElement("button");
+  rb.className = "btn"; rb.textContent = "↩ 自動に戻す";
+  rb.onclick = () => { s.pins = {}; setImpact(s, s.autoImp); show(s, s.cur); updateSync(); };
+  pins.appendChild(rb);
   slots[key] = s;
   return s;
 }
@@ -212,7 +224,7 @@ async function analyze(s) {
     s.frames = await runPass(s, lm, Array.from({ length: nF + 1 }, (_, i) => t0 + i * s.step), "インパクト前後を細かく解析中…");
     s.prog.hidden = true;
     process(s, foot);
-    s.status.textContent = `解析が完了しました！（${fine}コマ/秒で解析）インパクトがずれていたら、コマ送りで合わせて「📍 このコマをインパクトにする」を押してください。`;
+    s.status.textContent = `解析が完了しました！（${fine}コマ/秒で解析）各局面がずれていたら、コマ送りで合わせて「📍 〇〇にする」でピン止めできます。`;
     s.ready = true;
     s.viewer.hidden = false;
     s.overlay.width = v.videoWidth; s.overlay.height = v.videoHeight;
@@ -258,12 +270,15 @@ function process(s, foot) {
   const lo = 2, hi = Math.max(lo, F.length - 3);
   let imp = lo;
   for (let i = lo; i <= hi; i++) if (s.speed[i] > s.speed[imp]) imp = i;
+  s.pins = {};
+  s.autoImp = imp;
   setImpact(s, imp);
 }
 
 // インパクトのコマを決め、各局面を求め直す（自動・手動どちらでも使う）
-function setImpact(s, imp) {
+function setImpact(s, autoImp) {
   const F = s.frames, o = IDX[other(s.foot)];
+  const imp = s.pins["インパクト"] ?? autoImp;
   s.impact = imp;
   s.peakMs = Math.max(...s.speed) * s.torsoLen;
   const win = Math.round(0.6 / s.step);
@@ -277,8 +292,9 @@ function setImpact(s, imp) {
     if (d < best) { best = d; plant = i; }
   }
   const follow = Math.min(F.length - 1, imp + Math.round(0.25 / s.step));
-  s.phases = [{ name: "踏み込み", i: plant }, { name: "振りかぶり", i: back }, { name: "インパクト", i: imp }, { name: "フォロースルー", i: follow }];
-  s.back = back;
+  const auto = { "踏み込み": plant, "振りかぶり": back, "インパクト": imp, "フォロースルー": follow };
+  s.phases = PHASE_NAMES.map(name => ({ name, i: s.pins[name] ?? auto[name], pinned: name in s.pins }));
+  s.back = s.phases[1].i;
   renderPhases(s); renderCheck(s);
 }
 
@@ -288,7 +304,7 @@ function renderPhases(s) {
   box.innerHTML = "";
   for (const p of s.phases) {
     const b = document.createElement("button");
-    b.className = "btn"; b.textContent = p.name;
+    b.className = "btn"; b.textContent = (p.pinned ? "📌 " : "") + p.name;
     b.onclick = () => show(s, p.i);
     box.appendChild(b);
   }
