@@ -139,18 +139,18 @@ let tsCounter = 0;
 async function detectFps(v) {
   if (!v.requestVideoFrameCallback) return 60;
   const times = [];
-  try {
-    v.currentTime = 0; v.muted = true;
-    await new Promise(r => { v.onseeked = r; });
-    const done = new Promise(res => {
-      const cb = (_, m) => { times.push(m.mediaTime); if (times.length < 12) v.requestVideoFrameCallback(cb); else res(); };
-      v.requestVideoFrameCallback(cb);
-      setTimeout(res, 1500);
-    });
-    await v.play(); await done; v.pause();
-  } catch { return 60; }
+  const measure = new Promise(res => {
+    const cb = (_, m) => { times.push(m.mediaTime); if (times.length < 12) v.requestVideoFrameCallback(cb); else res(); };
+    v.requestVideoFrameCallback(cb);
+    v.muted = true;
+    const p = v.play();
+    if (p && p.catch) p.catch(res);
+  });
+  // 再生が許可されない・止まる環境でも固まらないよう、必ず時間で打ち切る
+  await Promise.race([measure, new Promise(r => setTimeout(r, 1500))]);
+  try { v.pause(); } catch {}
   const d = times.slice(1).map((t, i) => t - times[i]).filter(x => x > 1e-4);
-  return d.length ? Math.min(240, Math.max(24, Math.round(1 / median(d)))) : 60;
+  return d.length >= 3 ? Math.min(240, Math.max(24, Math.round(1 / median(d)))) : 60;
 }
 
 async function runPass(s, lm, times, label) {
